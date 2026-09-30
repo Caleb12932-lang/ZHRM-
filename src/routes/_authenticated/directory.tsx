@@ -60,9 +60,8 @@ function Directory() {
    * Add / update employee
    */
   const create = useMutation({
-    mutationFn: async (fd: FormData) => {
-      const get = (key: string) =>
-        String(fd.get(key) ?? "").trim();
+    mutationFn: async (fd: FormData): Promise<"created" | "updated"> => {
+      const get = (key: string) => String(fd.get(key) ?? "").trim();
 
       const fullName = get("full_name");
       const email = get("email").toLowerCase();
@@ -80,18 +79,19 @@ function Directory() {
         email,
         job_title: get("job_title") || null,
         location: get("location") || null,
-        employment_type:
-          get("employment_type") || "full_time",
+        employment_type: get("employment_type") || "full_time",
         hire_date: get("hire_date") || null,
       };
 
       const departmentId = get("department_id");
 
-      if (departmentId && departmentId !== "none") {
-        payload["department_id"] = departmentId;
-      } else {
-        payload["department_id"] = null;
+      // A department is required, because employees without one
+      // are hidden from the directory.
+      if (!departmentId || departmentId === "none") {
+        throw new Error("Please choose a department");
       }
+
+      payload["department_id"] = departmentId;
 
       const salary = get("salary");
 
@@ -108,27 +108,34 @@ function Directory() {
       }
 
       /*
-       * Check whether an employee with this email
-       * already exists.
+       * Check whether an employee with this email already exists.
+       *
+       * FIX: the old code used .maybeSingle(), which throws
+       * "JSON object requested, multiple (or no) rows returned"
+       * whenever 2+ rows share the email (e.g. duplicates created by
+       * earlier saves). We now ask for at most one row and read it
+       * from the array, so duplicates can never trigger that error.
+       *
+       * The email is also escaped, because "_" and "%" are wildcards
+       * in ilike and could match the wrong person.
        */
-      const {
-        data: existingEmployee,
-        error: findError,
-      } = await supabase
+      const escapedEmail = email.replace(/[\\%_]/g, "\\$&");
+
+      const { data: matches, error: findError } = await supabase
         .from("employees")
-        .select(
-          "id, user_id, full_name, email, job_title, department_id",
-        )
-        .eq("email", email)
-        .maybeSingle();
+        .select("id")
+        .ilike("email", escapedEmail)
+        .order("created_at", { ascending: true })
+        .limit(1);
 
       if (findError) {
         throw new Error(findError.message);
       }
 
+      const existingEmployee = matches?.[0];
+
       /*
-       * Existing employee:
-       * update instead of creating a duplicate.
+       * Existing employee: update instead of creating a duplicate.
        */
       if (existingEmployee) {
         const { error: updateError } = await supabase
@@ -140,12 +147,11 @@ function Directory() {
           throw new Error(updateError.message);
         }
 
-        return;
+        return "updated";
       }
 
       /*
-       * No existing employee:
-       * create a new employee.
+       * No existing employee: create a new one.
        */
       const { error: insertError } = await supabase
         .from("employees")
@@ -154,10 +160,16 @@ function Directory() {
       if (insertError) {
         throw new Error(insertError.message);
       }
+
+      return "created";
     },
 
-    onSuccess: () => {
-      toast.success("Employee saved");
+    onSuccess: (result) => {
+      toast.success(
+        result === "updated"
+          ? "Existing employee updated"
+          : "Employee added",
+      );
       setOpen(false);
 
       qc.invalidateQueries({
@@ -207,9 +219,8 @@ function Directory() {
    */
   const deptName = (id: string | null) => {
     return (
-      departments.data?.find(
-        (department) => department.id === id,
-      )?.name ?? "Unassigned"
+      departments.data?.find((department) => department.id === id)?.name ??
+      "Unassigned"
     );
   };
 
@@ -217,7 +228,10 @@ function Directory() {
    * Search and department filtering
    */
   const filtered = useMemo(() => {
-    const list = employees.data ?? [];
+    // Only employees assigned to a department appear in the directory.
+    const list = (employees.data ?? []).filter(
+      (employee) => employee.department_id,
+    );
 
     return list.filter((employee) => {
       const matchSearch = `
@@ -228,9 +242,7 @@ function Directory() {
         .toLowerCase()
         .includes(search.toLowerCase());
 
-      const matchDepartment =
-        dept === "all" ||
-        employee.department_id === dept;
+      const matchDepartment = dept === "all" || employee.department_id === dept;
 
       return matchSearch && matchDepartment;
     });
@@ -243,10 +255,7 @@ function Directory() {
         description="Everyone in the organisation, with roles, teams and contact details."
         action={
           me?.isHr ? (
-            <Dialog
-              open={open}
-              onOpenChange={setOpen}
-            >
+            <Dialog open={open} onOpenChange={setOpen}>
               <DialogTrigger asChild>
                 <Button>
                   <Plus className="size-4" />
@@ -256,9 +265,7 @@ function Directory() {
 
               <DialogContent>
                 <DialogHeader>
-                  <DialogTitle>
-                    Add employee
-                  </DialogTitle>
+                  <DialogTitle>Add employee</DialogTitle>
                 </DialogHeader>
 
                 <form
@@ -266,74 +273,66 @@ function Directory() {
                   onSubmit={(event) => {
                     event.preventDefault();
 
-                    const formData = new FormData(
-                      event.currentTarget,
-                    );
+                    const formData = new FormData(event.currentTarget);
 
                     create.mutate(formData);
                   }}
                 >
                   <div className="space-y-2 sm:col-span-2">
-                    <Label htmlFor="full_name">
-                      Full name
-                    </Label>
+                    <Label htmlFor="full_name">Full name</Label>
 
-                    <Input
-                      id="full_name"
-                      name="full_name"
-                      required
-                    />
+                    <Input id="full_name" name="full_name" required />
                   </div>
 
                   <div className="space-y-2 sm:col-span-2">
-                    <Label htmlFor="email">
-                      Email
-                    </Label>
+                    <Label htmlFor="email">Email</Label>
 
-                    <Input
-                      id="email"
-                      name="email"
-                      type="email"
-                      required
-                    />
+                    <Input id="email" name="email" type="email" required />
                   </div>
 
                   <div className="space-y-2">
-                    <Label htmlFor="job_title">
-                      Job title
-                    </Label>
+                    <Label htmlFor="job_title">Job title</Label>
 
-                    <Input
-                      id="job_title"
-                      name="job_title"
-                    />
+                    <Input id="job_title" name="job_title" />
                   </div>
 
                   <div className="space-y-2">
-                    <Label>
-                      Department
-                    </Label>
+                    <Label>Department</Label>
 
-                    <Select
-                      name="department_id"
-                      defaultValue="none"
-                    >
+                    <Select name="department_id" required>
+                      <SelectTrigger>
+                        <SelectValue placeholder="Choose department" />
+                      </SelectTrigger>
+
+                      <SelectContent>
+                        {(departments.data ?? []).map((department) => (
+                          <SelectItem key={department.id} value={department.id}>
+                            {department.name}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+
+                  <div className="space-y-2">
+                    <Label htmlFor="location">Location</Label>
+
+                    <Input id="location" name="location" />
+                  </div>
+
+                  <div className="space-y-2">
+                    <Label>Employment type</Label>
+
+                    <Select name="employment_type" defaultValue="full_time">
                       <SelectTrigger>
                         <SelectValue />
                       </SelectTrigger>
 
                       <SelectContent>
-                        <SelectItem value="none">
-                          Unassigned
-                        </SelectItem>
-
-                        {(departments.data ?? []).map(
-                          (department) => (
-                            <SelectItem
-                              key={department.id}
-                              value={department.id}
-                            >
-                              {department.name}
+                        {["full_time", "part_time", "contract", "intern"].map(
+                          (type) => (
+                            <SelectItem key={type} value={type}>
+                              {titleCase(type)}
                             </SelectItem>
                           ),
                         )}
@@ -342,63 +341,13 @@ function Directory() {
                   </div>
 
                   <div className="space-y-2">
-                    <Label htmlFor="location">
-                      Location
-                    </Label>
+                    <Label htmlFor="hire_date">Hire date</Label>
 
-                    <Input
-                      id="location"
-                      name="location"
-                    />
+                    <Input id="hire_date" name="hire_date" type="date" />
                   </div>
 
                   <div className="space-y-2">
-                    <Label>
-                      Employment type
-                    </Label>
-
-                    <Select
-                      name="employment_type"
-                      defaultValue="full_time"
-                    >
-                      <SelectTrigger>
-                        <SelectValue />
-                      </SelectTrigger>
-
-                      <SelectContent>
-                        {[
-                          "full_time",
-                          "part_time",
-                          "contract",
-                          "intern",
-                        ].map((type) => (
-                          <SelectItem
-                            key={type}
-                            value={type}
-                          >
-                            {titleCase(type)}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
-
-                  <div className="space-y-2">
-                    <Label htmlFor="hire_date">
-                      Hire date
-                    </Label>
-
-                    <Input
-                      id="hire_date"
-                      name="hire_date"
-                      type="date"
-                    />
-                  </div>
-
-                  <div className="space-y-2">
-                    <Label htmlFor="salary">
-                      Annual salary
-                    </Label>
+                    <Label htmlFor="salary">Annual salary</Label>
 
                     <Input
                       id="salary"
@@ -410,13 +359,8 @@ function Directory() {
                   </div>
 
                   <DialogFooter className="sm:col-span-2">
-                    <Button
-                      type="submit"
-                      disabled={create.isPending}
-                    >
-                      {create.isPending
-                        ? "Saving..."
-                        : "Save employee"}
+                    <Button type="submit" disabled={create.isPending}>
+                      {create.isPending ? "Saving..." : "Save employee"}
                     </Button>
                   </DialogFooter>
                 </form>
@@ -434,35 +378,23 @@ function Directory() {
             className="pl-9"
             placeholder="Search by name, email or role"
             value={search}
-            onChange={(event) =>
-              setSearch(event.target.value)
-            }
+            onChange={(event) => setSearch(event.target.value)}
           />
         </div>
 
-        <Select
-          value={dept}
-          onValueChange={setDept}
-        >
+        <Select value={dept} onValueChange={setDept}>
           <SelectTrigger className="w-52">
             <SelectValue />
           </SelectTrigger>
 
           <SelectContent>
-            <SelectItem value="all">
-              All departments
-            </SelectItem>
+            <SelectItem value="all">All departments</SelectItem>
 
-            {(departments.data ?? []).map(
-              (department) => (
-                <SelectItem
-                  key={department.id}
-                  value={department.id}
-                >
-                  {department.name}
-                </SelectItem>
-              ),
-            )}
+            {(departments.data ?? []).map((department) => (
+              <SelectItem key={department.id} value={department.id}>
+                {department.name}
+              </SelectItem>
+            ))}
           </SelectContent>
         </Select>
       </div>
@@ -483,19 +415,14 @@ function Directory() {
                   </div>
 
                   <div className="min-w-0 flex-1">
-                    <p className="truncate font-medium">
-                      {employee.full_name}
-                    </p>
+                    <p className="truncate font-medium">{employee.full_name}</p>
 
                     <p className="truncate text-sm text-muted-foreground">
-                      {employee.job_title ??
-                        "Role not set"}
+                      {employee.job_title ?? "Role not set"}
                     </p>
                   </div>
 
-                  <StatusBadge
-                    status={employee.status}
-                  />
+                  <StatusBadge status={employee.status} />
                 </div>
 
                 <div className="mt-4 space-y-1.5 text-sm text-muted-foreground">
@@ -513,29 +440,17 @@ function Directory() {
 
                   <p className="flex items-center gap-2">
                     <MapPin className="size-3.5" />
-                    {employee.location ??
-                      "Remote"}
+                    {employee.location ?? "Remote"}
                   </p>
                 </div>
 
                 <div className="mt-4 border-t pt-3">
                   <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
-                    <span>
-                      {deptName(
-                        employee.department_id,
-                      )}
-                    </span>
+                    <span>{deptName(employee.department_id)}</span>
 
-                    <span>
-                      Joined{" "}
-                      {prettyDate(
-                        employee.hire_date,
-                      )}
-                    </span>
+                    <span>Joined {prettyDate(employee.hire_date)}</span>
 
-                    {(me?.isHr ||
-                      me?.employee?.id ===
-                      employee.id) &&
+                    {(me?.isHr || me?.employee?.id === employee.id) &&
                       employee.salary != null && (
                         <span className="font-medium text-foreground">
                           {money(employee.salary)}
@@ -544,22 +459,17 @@ function Directory() {
                       )}
                   </div>
 
-                  {me?.isHr &&
-                    employee.department_id && (
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        className="mt-3"
-                        onClick={() =>
-                          setRemoveEmployee(
-                            employee,
-                          )
-                        }
-                      >
-                        <UserMinus className="mr-2 size-4" />
-                        Remove from department
-                      </Button>
-                    )}
+                  {me?.isHr && employee.department_id && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="mt-3"
+                      onClick={() => setRemoveEmployee(employee)}
+                    >
+                      <UserMinus className="mr-2 size-4" />
+                      Remove from department
+                    </Button>
+                  )}
                 </div>
               </CardContent>
             </Card>
@@ -577,9 +487,7 @@ function Directory() {
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>
-              Remove from department?
-            </DialogTitle>
+            <DialogTitle>Remove from department?</DialogTitle>
           </DialogHeader>
 
           <div className="text-sm text-muted-foreground">
@@ -588,38 +496,26 @@ function Directory() {
                 <strong className="text-foreground">
                   {removeEmployee.full_name}
                 </strong>{" "}
-                will remain an active employee
-                but will no longer be assigned to{" "}
+                will be removed from{" "}
                 <strong className="text-foreground">
-                  {deptName(
-                    removeEmployee.department_id,
-                  )}
-                </strong>
-                .
+                  {deptName(removeEmployee.department_id)}
+                </strong>{" "}
+                and will no longer appear in the people directory.
               </p>
             )}
           </div>
 
           <DialogFooter>
-            <Button
-              variant="outline"
-              onClick={() =>
-                setRemoveEmployee(null)
-              }
-            >
+            <Button variant="outline" onClick={() => setRemoveEmployee(null)}>
               Cancel
             </Button>
 
             <Button
               variant="destructive"
-              disabled={
-                removeFromDepartment.isPending
-              }
+              disabled={removeFromDepartment.isPending}
               onClick={() => {
                 if (removeEmployee) {
-                  removeFromDepartment.mutate(
-                    removeEmployee.id,
-                  );
+                  removeFromDepartment.mutate(removeEmployee.id);
                 }
               }}
             >
